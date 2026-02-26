@@ -21,7 +21,8 @@ MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 )
 async def convert_image_format(
     file: UploadFile = File(..., description="Input image (max 10 MB)"),
-    output_type: str = Form(..., description="Target MIME type, e.g. image/webp"),
+    output_type: str = Form("image/webp", description="Target MIME type, e.g. image/webp. Default: image/webp."),
+    quality: int = Form(80, description="Compression quality 0 (smallest) to 100 (best). Default: 80."),
 ) -> Response:
     """
     Convert an uploaded image to the requested format.
@@ -50,6 +51,13 @@ async def convert_image_format(
                    f"Supported types: {', '.join(MIME_TO_SUFFIX.keys())}",
         )
 
+    # Validate quality
+    if not (0 <= quality <= 100):
+        raise HTTPException(
+            status_code=422,
+            detail="Quality must be an integer between 0 and 100.",
+        )
+
     # Read and enforce size limit
     image_bytes = await file.read()
     if len(image_bytes) > MAX_FILE_SIZE:
@@ -60,7 +68,7 @@ async def convert_image_format(
         )
 
     try:
-        converted_bytes, output_mime = convert_image(image_bytes, output_type)
+        converted_bytes, output_mime = convert_image(image_bytes, output_type, quality)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
     except (OSError, Exception) as e:

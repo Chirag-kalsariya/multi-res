@@ -69,9 +69,13 @@ def _to_srgb(img: Image.Image) -> tuple[Image.Image, bytes | None]:
         return img, srgb_bytes
 
 
-def convert_image(image_bytes: bytes, output_mime: str) -> tuple[bytes, str]:
+def convert_image(
+    image_bytes: bytes,
+    output_mime: str,
+    quality: int = 80,
+) -> tuple[bytes, str]:
     """
-    Convert image bytes to the requested output MIME type without any compression.
+    Convert image bytes to the requested output MIME type.
 
     Performs ICC color profile conversion to sRGB so colors are preserved
     accurately across all target formats, matching the output of sharp/libvips.
@@ -79,12 +83,15 @@ def convert_image(image_bytes: bytes, output_mime: str) -> tuple[bytes, str]:
     Args:
         image_bytes: Raw bytes of the input image.
         output_mime: Target MIME type (e.g. "image/webp").
+        quality: Compression quality from 0 (smallest) to 100 (best). Default 80.
+                 For lossless formats (PNG, TIFF) this controls compression
+                 effort/level rather than lossy quality.
 
     Returns:
         Tuple of (converted image bytes, output MIME type string).
 
     Raises:
-        ValueError: If the output MIME type is not supported.
+        ValueError: If the output MIME type is not supported or quality is out of range.
         OSError: If Pillow cannot decode the input image.
     """
     output_mime = output_mime.lower().strip()
@@ -94,6 +101,9 @@ def convert_image(image_bytes: bytes, output_mime: str) -> tuple[bytes, str]:
             f"Unsupported output type '{output_mime}'. "
             f"Supported types: {', '.join(MIME_TO_SUFFIX.keys())}"
         )
+
+    if not (0 <= quality <= 100):
+        raise ValueError("Quality must be between 0 and 100.")
 
     suffix = MIME_TO_SUFFIX[output_mime]
     fmt    = _SUFFIX_TO_PILLOW_FORMAT[suffix]
@@ -111,23 +121,35 @@ def convert_image(image_bytes: bytes, output_mime: str) -> tuple[bytes, str]:
         elif fmt not in ("JPEG", "BMP") and img.mode == "P":
             img = img.convert("RGBA")
 
-        save_kwargs: dict = {"icc_profile": icc_bytes}
+        output_buffer = io.BytesIO()
 
         if fmt == "JPEG":
-            save_kwargs.update({"quality": 100, "subsampling": 0})
+            # subsampling=0 keeps full chroma resolution (4:4:4).
+            img.save(output_buffer, format="JPEG",
+                     quality=quality, subsampling=0, optimize=True,
+                     icc_profile=icc_bytes)
         elif fmt == "PNG":
-            save_kwargs.update({"compress_level": 0})
+            # PNG is lossless — compress_level controls deflate effort (0=none, 9=max).
+            # Must be saved separately from icc_profile to ensure compress_level takes effect.
+            # Map quality 0-100 → compress_level 9-0
+            # (quality 0 = max compression/smallest, quality 100 = no compression/largest).
+            compress_level = round((100 - quality) / 100 * 9)
+            img.save(output_buffer, format="PNG",
+                     compress_level=compress_level, optimize=True,
+                     icc_profile=icc_bytes)
         elif fmt == "WEBP":
-            # Quality 90 lossy produces files comparable in size to the source
-            # while preserving visually lossless quality.
-            # Lossless WebP of a decoded JPEG would be ~5x larger than the source
-            # because lossless has to encode every pixel the JPEG approximated.
-            save_kwargs.update({"quality": 90, "method": 6})
+            # method=6 uses the best (slowest) compression effort.
+            img.save(output_buffer, format="WEBP",
+                     quality=quality, method=6,
+                     icc_profile=icc_bytes)
         elif fmt == "TIFF":
-            save_kwargs.update({"compression": "raw"})
-
-        output_buffer = io.BytesIO()
-        img.save(output_buffer, format=fmt, **save_kwargs)
+            # JPEG-in-TIFF applies lossy compression and respects quality.
+            img.save(output_buffer, format="TIFF",
+                     compression="jpeg", quality=quality,
+                     icc_profile=icc_bytes)
+        else:
+            # BMP — no compression options, always stores raw pixels.
+            img.save(output_buffer, format=fmt, icc_profile=icc_bytes)
         output_buffer.seek(0)
 
     return output_buffer.read(), output_mime
